@@ -1,24 +1,17 @@
 import requests
 import time
-import json
+import os
 from datetime import datetime, timezone, timedelta
 
-# ── Konfigurasi ──────────────────────────────────────────
-import os
+# ── Konfigurasi dari Environment Variables ───────────────
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID   = os.environ.get("CHAT_ID")
-```
-
----
-
-**3️⃣ Simpan token di Railway (aman)**
-- Buka Railway → project kamu
-- Klik **Variables**
-- Tambah:
-```
-BOT_TOKEN = token_baru_kamu
-CHAT_ID   = 6772610365
 FETCH_INTERVAL = 15  # detik
+
+if not BOT_TOKEN or not CHAT_ID:
+    print("[ERROR] BOT_TOKEN dan CHAT_ID harus diset di environment variables!")
+    print("Di Railway: Settings → Variables → tambah BOT_TOKEN dan CHAT_ID")
+    exit(1)
 
 # ── WIB UTC+7 ─────────────────────────────────────────────
 WIB = timezone(timedelta(hours=7))
@@ -35,10 +28,10 @@ def get_session():
 
 def market_open():
     n = datetime.now(timezone.utc)
-    d, h = n.weekday(), n.hour  # 0=Mon, 6=Sun
-    if d == 6: return False       # Minggu
-    if d == 5: return False       # Sabtu
-    if d == 4 and h >= 22: return False  # Jumat malam
+    d, h = n.weekday(), n.hour
+    if d == 6: return False
+    if d == 5: return False
+    if d == 4 and h >= 22: return False
     return True
 
 # ── Telegram ──────────────────────────────────────────────
@@ -87,23 +80,22 @@ def calc_fib(lo, hi):
 
 # ── State ─────────────────────────────────────────────────
 state = {
-    "candles":     [],
-    "cur_candle":  None,
-    "prev_price":  None,
-    "asia_lo":     None,
-    "asia_hi":     None,
-    "fib":         None,
-    "fib_locked":  False,
-    "buy_done":    False,
-    "sell_done":   False,
-    "buy2_done":   False,
-    "alerted":     set(),
-    "last_day":    None,
+    "candles":    [],
+    "cur_candle": None,
+    "prev_price": None,
+    "asia_lo":    None,
+    "asia_hi":    None,
+    "fib":        None,
+    "fib_locked": False,
+    "buy_done":   False,
+    "sell_done":  False,
+    "buy2_done":  False,
+    "alerted":    set(),
+    "last_day":   None,
 }
 
 def reset_daily():
-    wib_now = now_wib()
-    today   = wib_now.strftime("%Y-%m-%d")
+    today = now_wib().strftime("%Y-%m-%d")
     if state["last_day"] == today:
         return
     print(f"[RESET] Hari baru: {today}")
@@ -120,16 +112,15 @@ def reset_daily():
     send_telegram(
         f"🔄 *Reset Harian XAUUSD Bot*\n"
         f"📅 {today}\n"
-        f"🕐 {wib_now.strftime('%H:%M')} WIB\n"
+        f"🕐 {now_wib().strftime('%H:%M')} WIB\n"
         f"Bot siap monitoring sesi Asia!"
     )
 
 def signal(sig_type, price, detail):
-    key = f"{sig_type}-{now_wib().strftime('%Y-%m-%d-%H-%M')[:13]}"
+    key = f"{sig_type}-{now_wib().strftime('%Y-%m-%d-%H')}"
     if key in state["alerted"]:
         return
     state["alerted"].add(key)
-
     labels = {
         "BUY1": "📈 BUY — Sesi Asia",
         "SELL": "📉 SELL — London Open",
@@ -151,17 +142,15 @@ def signal(sig_type, price, detail):
 def process_candle(candle):
     if not market_open():
         return
-    sess   = get_session()
-    all_c  = state["candles"]
-    b      = detect_bos(all_c)
+    sess = get_session()
+    all_c = state["candles"]
+    b = detect_bos(all_c)
 
-    # ── Asia: tracking low & high ──────────────────────────
     if sess == "asia":
         lo = candle["low"]
         hi = candle["high"]
         state["asia_lo"] = lo if state["asia_lo"] is None else min(state["asia_lo"], lo)
         state["asia_hi"] = hi if state["asia_hi"] is None else max(state["asia_hi"], hi)
-
         if b == "BULL" and not state["buy_done"]:
             state["buy_done"] = True
             signal("BUY1", candle["close"],
@@ -170,28 +159,25 @@ def process_candle(candle):
                 f"🛡 SL: Di bawah Low Asia\n"
                 f"📊 TF: M5")
 
-    # ── Pre/London: hitung Fib ─────────────────────────────
     if sess in ("pre", "london"):
         if state["asia_lo"] and state["asia_hi"] and not state["fib_locked"]:
             state["fib"]        = calc_fib(state["asia_lo"], state["asia_hi"])
             state["fib_locked"] = True
             f = state["fib"]
-            print(f"[FIB] Lo={f['f100']} | 61.8%={f['f618']} | 38.2%={f['f382']} | Hi={f['f0']}")
+            print(f"[FIB] Lo={f['f100']} 38.2%={f['f382']} 61.8%={f['f618']} Hi={f['f0']}")
             send_telegram(
                 f"📐 *Fibonacci Terbentuk*\n"
                 f"━━━━━━━━━━━━━━\n"
                 f"🟦 Low Asia:  *${f['f100']:.2f}*\n"
-                f"🟡 38.2%:    *${f['f382']:.2f}*\n"
-                f"🔴 61.8%:    *${f['f618']:.2f}*\n"
+                f"🟡 38.2%:     *${f['f382']:.2f}*\n"
+                f"🔴 61.8%:     *${f['f618']:.2f}*\n"
                 f"🟢 High Asia: *${f['f0']:.2f}*\n"
                 f"🕐 {now_wib().strftime('%H:%M')} WIB"
             )
 
-    # ── London: SELL & BUY2 ────────────────────────────────
     if sess == "london" and state["asia_hi"] and state["fib"]:
         hi = state["asia_hi"]
         f  = state["fib"]
-
         if abs(candle["close"] - hi) <= 8 and b == "BEAR" and not state["sell_done"]:
             state["sell_done"] = True
             signal("SELL", candle["close"],
@@ -199,7 +185,6 @@ def process_candle(candle):
                 f"🎯 TP: 61.8% *${f['f618']:.2f}*\n"
                 f"🛡 SL: Di atas High Asia\n"
                 f"📊 TF: M5")
-
         if abs(candle["close"] - f["f618"]) <= 8 and b == "BULL" and not state["buy2_done"]:
             state["buy2_done"] = True
             signal("BUY2", candle["close"],
@@ -213,12 +198,14 @@ def main():
     print("=" * 40)
     print("  XAUUSD Auto Alert Bot - M5")
     print("  gold-api.com | Telegram")
+    print("  Token: dari environment variable")
     print("=" * 40)
 
     send_telegram(
         f"🚀 *XAUUSD Bot Started!*\n"
         f"📡 API: gold-api.com (unlimited)\n"
         f"📊 Timeframe: M5\n"
+        f"🔒 Token: environment variable ✅\n"
         f"🕐 {now_wib().strftime('%d %b %Y %H:%M')} WIB\n"
         f"Bot siap mengirim sinyal BOS + Fibonacci!"
     )
@@ -227,15 +214,13 @@ def main():
         try:
             reset_daily()
             price = fetch_price()
-
             if price:
                 prev  = state["prev_price"]
                 chg   = round(price - prev, 2) if prev else 0
                 sess  = get_session()
                 arrow = "▲" if chg >= 0 else "▼"
-                print(f"[{now_wib().strftime('%H:%M:%S')}] ${price:.2f} {arrow}{abs(chg):.2f} | {sess} | Asia Lo:{state['asia_lo']} Hi:{state['asia_hi']}")
+                print(f"[{now_wib().strftime('%H:%M:%S')}] ${price:.2f} {arrow}{abs(chg):.2f} | {sess} | Lo:{state['asia_lo']} Hi:{state['asia_hi']}")
 
-                # Build M5 candle
                 mk = int(time.time() // 300)
                 if state["cur_candle"] is None or state["cur_candle"]["mk"] != mk:
                     if state["cur_candle"] is not None:
