@@ -7,13 +7,13 @@ from datetime import datetime, timezone, timedelta
 BOT_TOKEN = os.environ.get("BOT_TOKEN")
 CHAT_ID   = os.environ.get("CHAT_ID")
 FETCH_INTERVAL = 15
+SR_TOLERANCE   = 10  # ±10 poin
 
 if not BOT_TOKEN or not CHAT_ID:
     print("[ERROR] BOT_TOKEN dan CHAT_ID harus diset di environment variables!")
     exit(1)
 
 WIB = timezone(timedelta(hours=7))
-SR_TOLERANCE = 10  # ±10 poin
 
 def now_wib():
     return datetime.now(WIB)
@@ -36,21 +36,18 @@ def market_open():
 # ── Telegram ──────────────────────────────────────────────
 def send_telegram(text):
     url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}
     try:
-        r = requests.post(url, json=payload, timeout=10)
+        r = requests.post(url, json={"chat_id": CHAT_ID, "text": text, "parse_mode": "Markdown"}, timeout=10)
         return r.json().get("ok", False)
     except Exception as e:
         print(f"[TG ERROR] {e}")
         return False
 
 def get_updates(offset=None):
-    url = f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates"
-    params = {"timeout": 1, "allowed_updates": ["message"]}
-    if offset:
-        params["offset"] = offset
     try:
-        r = requests.get(url, params=params, timeout=5)
+        params = {"timeout": 1, "allowed_updates": ["message"]}
+        if offset: params["offset"] = offset
+        r = requests.get(f"https://api.telegram.org/bot{BOT_TOKEN}/getUpdates", params=params, timeout=5)
         return r.json().get("result", [])
     except:
         return []
@@ -65,22 +62,22 @@ def fetch_price():
         return None
 
 # ── Indikator ─────────────────────────────────────────────
-def detect_bos(candles, lookback=5):
-    if len(candles) < lookback + 2: return None
-    recent = candles[-(lookback+1):]
-    last, prev = recent[-1], recent[:-1]
+def detect_bos(candles, lb=5):
+    if len(candles) < lb + 2: return None
+    rec = candles[-(lb+1):]
+    last, prev = rec[-1], rec[:-1]
     if last["close"] > max(c["high"] for c in prev): return "BULL"
     if last["close"] < min(c["low"]  for c in prev): return "BEAR"
     return None
 
-def detect_rejection(candle):
-    body = abs(candle["close"] - candle["open"])
-    upper_wick = candle["high"] - max(candle["open"], candle["close"])
-    lower_wick = min(candle["open"], candle["close"]) - candle["low"]
-    total = candle["high"] - candle["low"]
-    if total == 0: return None
-    if lower_wick > body * 1.5 and lower_wick > total * 0.4: return "BULLISH"
-    if upper_wick > body * 1.5 and upper_wick > total * 0.4: return "BEARISH"
+def detect_rejection(c):
+    body = abs(c["close"] - c["open"])
+    uw   = c["high"] - max(c["open"], c["close"])
+    lw   = min(c["open"], c["close"]) - c["low"]
+    tot  = c["high"] - c["low"]
+    if tot == 0: return None
+    if lw > body * 1.5 and lw > tot * 0.4: return "BULLISH"
+    if uw > body * 1.5 and uw > tot * 0.4: return "BEARISH"
     return None
 
 def calc_fib(lo, hi):
@@ -92,43 +89,96 @@ def calc_fib(lo, hi):
         "f100": round(lo, 2),
     }
 
-# ── Auto S&R dari PDH/PDL & Weekly ───────────────────────
-def calc_auto_sr(candles):
-    if len(candles) < 2: return []
+# ── Auto S&R Detection ────────────────────────────────────
+def get_auto_sr(candles, current_price):
     levels = []
-    # Previous Day High/Low (288 candle M5 = 1 hari)
-    day_candles = candles[-288:-1] if len(candles) >= 288 else candles[:-1]
-    if day_candles:
-        pdh = max(c["high"] for c in day_candles)
-        pdl = min(c["low"]  for c in day_candles)
+    if len(candles) < 10:
+        return levels
+
+    # ── 1. PDH / PDL (1 hari = 288 candle M5) ────────────
+    day = 288
+    if len(candles) >= day * 2:
+        yesterday = candles[-(day*2):-(day)]
+        pdh = round(max(c["high"] for c in yesterday), 2)
+        pdl = round(min(c["low"]  for c in yesterday), 2)
         levels.append({"price": pdh, "label": "PDH (High Kemarin)", "type": "resistance"})
         levels.append({"price": pdl, "label": "PDL (Low Kemarin)",  "type": "support"})
-    # Weekly High/Low (2016 candle M5 = 1 minggu)
-    week_candles = candles[-2016:-1] if len(candles) >= 2016 else candles[:-1]
-    if week_candles:
-        wkh = max(c["high"] for c in week_candles)
-        wkl = min(c["low"]  for c in week_candles)
+    elif len(candles) >= day:
+        prev = candles[:-(min(len(candles)//2, day))]
+        if prev:
+            levels.append({"price": round(max(c["high"] for c in prev), 2), "label": "PDH", "type": "resistance"})
+            levels.append({"price": round(min(c["low"]  for c in prev), 2), "label": "PDL", "type": "support"})
+
+    # ── 2. Weekly High / Low (1 minggu = 2016 candle M5) ──
+    week = 2016
+    if len(candles) >= week:
+        wk = candles[-week:]
+        wkh = round(max(c["high"] for c in wk), 2)
+        wkl = round(min(c["low"]  for c in wk), 2)
         levels.append({"price": wkh, "label": "Weekly High", "type": "resistance"})
         levels.append({"price": wkl, "label": "Weekly Low",  "type": "support"})
-    return levels
+    elif len(candles) >= day * 3:
+        wk = candles[-(day*3):]
+        levels.append({"price": round(max(c["high"] for c in wk), 2), "label": "Weekly High (~3d)", "type": "resistance"})
+        levels.append({"price": round(min(c["low"]  for c in wk), 2), "label": "Weekly Low (~3d)",  "type": "support"})
+
+    # ── 3. Monthly High / Low (1 bulan = ~8640 candle M5) ─
+    month = 8640
+    if len(candles) >= month:
+        mo = candles[-month:]
+        moh = round(max(c["high"] for c in mo), 2)
+        mol = round(min(c["low"]  for c in mo), 2)
+        levels.append({"price": moh, "label": "Monthly High", "type": "resistance"})
+        levels.append({"price": mol, "label": "Monthly Low",  "type": "support"})
+    elif len(candles) >= day * 7:
+        mo = candles[-(day*7):]
+        levels.append({"price": round(max(c["high"] for c in mo), 2), "label": "Monthly High (~7d)", "type": "resistance"})
+        levels.append({"price": round(min(c["low"]  for c in mo), 2), "label": "Monthly Low (~7d)",  "type": "support"})
+
+    # ── 4. Round Numbers ($100 interval) ──────────────────
+    base = int(current_price / 100) * 100
+    for mult in range(-3, 5):
+        rn = base + mult * 100
+        if rn > 0:
+            diff = abs(current_price - rn)
+            if diff <= 150:  # tampilkan round number dalam range ±150
+                rn_type = "resistance" if rn > current_price else "support"
+                levels.append({"price": float(rn), "label": f"Round Number ${rn}", "type": rn_type})
+
+    # ── 5. Half Round Numbers ($50 interval) ──────────────
+    base50 = int(current_price / 50) * 50
+    for mult in range(-2, 4):
+        rn = base50 + mult * 50
+        if rn % 100 != 0 and rn > 0:  # skip yang sudah ada di round 100
+            diff = abs(current_price - rn)
+            if diff <= 80:
+                rn_type = "resistance" if rn > current_price else "support"
+                levels.append({"price": float(rn), "label": f"Half Round ${rn}", "type": rn_type})
+
+    # Hapus duplikat level yang terlalu dekat (< 5 poin)
+    unique = []
+    for lv in sorted(levels, key=lambda x: x["price"]):
+        if not unique or abs(lv["price"] - unique[-1]["price"]) >= 5:
+            unique.append(lv)
+
+    return unique
 
 # ── State ─────────────────────────────────────────────────
 state = {
-    "candles":      [],
-    "cur_candle":   None,
-    "prev_price":   None,
-    "asia_lo":      None,
-    "asia_hi":      None,
-    "fib":          None,
-    "fib_locked":   False,
-    "buy_done":     False,
-    "sell_done":    False,
-    "buy2_done":    False,
-    "alerted":      set(),
-    "last_day":     None,
-    "manual_sr":    [],        # level manual dari user
-    "sr_alerted":   set(),     # tracking alert S&R
-    "last_update":  0,         # untuk polling Telegram command
+    "candles":    [],
+    "cur_candle": None,
+    "prev_price": None,
+    "asia_lo":    None,
+    "asia_hi":    None,
+    "fib":        None,
+    "fib_locked": False,
+    "buy_done":   False,
+    "sell_done":  False,
+    "buy2_done":  False,
+    "alerted":    set(),
+    "sr_alerted": set(),
+    "last_day":   None,
+    "last_update": 0,
 }
 
 def reset_daily():
@@ -144,180 +194,12 @@ def reset_daily():
     })
     send_telegram(
         f"🔄 *Reset Harian XAUUSD Bot*\n"
-        f"📅 {today}\n🕐 {now_wib().strftime('%H:%M')} WIB\n"
-        f"Bot siap monitoring!\n\n"
-        f"📌 *Level Manual aktif:*\n" +
-        ("\n".join([f"• {s['label']}: *${s['price']:.2f}*" for s in state["manual_sr"]])
-         if state["manual_sr"] else "Belum ada. Kirim /addsr untuk tambah.")
+        f"📅 {today} | 🕐 {now_wib().strftime('%H:%M')} WIB\n"
+        f"━━━━━━━━━━━━━━\n"
+        f"Bot siap monitoring sesi Asia!\n"
+        f"S&R otomatis aktif 🤖\n"
+        f"Ketik /help untuk commands"
     )
-
-# ── Command Handler ───────────────────────────────────────
-def handle_commands():
-    updates = get_updates(offset=state["last_update"])
-    for upd in updates:
-        state["last_update"] = upd["update_id"] + 1
-        msg = upd.get("message", {})
-        text = msg.get("text", "").strip()
-        if not text: continue
-
-        print(f"[CMD] {text}")
-
-        # /addsr 3050.00 Resistance Area
-        if text.startswith("/addsr"):
-            parts = text.split(" ", 2)
-            if len(parts) >= 2:
-                try:
-                    price = float(parts[1])
-                    label = parts[2] if len(parts) > 2 else f"Manual SR ${price:.2f}"
-                    sr_type = "support" if len(state["manual_sr"]) % 2 == 0 else "resistance"
-                    state["manual_sr"].append({"price": price, "label": label, "type": sr_type})
-                    send_telegram(
-                        f"✅ *Level S&R Ditambahkan*\n"
-                        f"📍 {label}: *${price:.2f}*\n"
-                        f"Toleransi: ±{SR_TOLERANCE} poin"
-                    )
-                except:
-                    send_telegram("❌ Format salah. Contoh:\n`/addsr 3050.00 Resistance Area`")
-            else:
-                send_telegram("❌ Format: `/addsr 3050.00 Nama Level`")
-
-        # /listsr
-        elif text == "/listsr":
-            auto = calc_auto_sr(state["candles"])
-            all_sr = auto + state["manual_sr"]
-            if not all_sr:
-                send_telegram("Belum ada level S&R.")
-            else:
-                msg_lines = ["📋 *Level S&R Aktif:*\n"]
-                msg_lines.append("*Auto:*")
-                for s in auto:
-                    msg_lines.append(f"• {s['label']}: *${s['price']:.2f}*")
-                if state["manual_sr"]:
-                    msg_lines.append("\n*Manual:*")
-                    for s in state["manual_sr"]:
-                        msg_lines.append(f"• {s['label']}: *${s['price']:.2f}*")
-                send_telegram("\n".join(msg_lines))
-
-        # /delsr
-        elif text == "/delsr":
-            state["manual_sr"] = []
-            send_telegram("✅ Semua level S&R manual dihapus.")
-
-        # /status
-        elif text == "/status":
-            price = state["prev_price"]
-            send_telegram(
-                f"📊 *Status Bot XAUUSD*\n"
-                f"━━━━━━━━━━━━━━\n"
-                f"💰 Harga: *${price:.2f}*\n" if price else "💰 Harga: Menunggu...\n"
-                f"🌏 Sesi: *{get_session()}*\n"
-                f"📍 Low Asia: *${state['asia_lo']:.2f}*\n" if state["asia_lo"] else "📍 Low Asia: Belum ada\n"
-                f"📍 High Asia: *${state['asia_hi']:.2f}*\n" if state["asia_hi"] else "📍 High Asia: Belum ada\n"
-                f"📐 Fib: {'✅' if state['fib'] else '⏳ Belum'}\n"
-                f"📈 BUY Asia: {'✅' if state['buy_done'] else '⏳'}\n"
-                f"📉 SELL London: {'✅' if state['sell_done'] else '⏳'}\n"
-                f"🔄 BUY 61.8%: {'✅' if state['buy2_done'] else '⏳'}\n"
-                f"🕐 {now_wib().strftime('%H:%M:%S')} WIB"
-            )
-
-        # /help
-        elif text == "/help" or text == "/start":
-            send_telegram(
-                f"🥇 *XAUUSD Bot Commands:*\n"
-                f"━━━━━━━━━━━━━━\n"
-                f"/status → Lihat status bot & harga\n"
-                f"/listsr → Lihat semua level S&R\n"
-                f"/addsr [harga] [nama] → Tambah S&R manual\n"
-                f"  Contoh: `/addsr 3050.00 Resistance`\n"
-                f"/delsr → Hapus semua S&R manual\n"
-                f"/help → Tampilkan menu ini\n"
-                f"━━━━━━━━━━━━━━\n"
-                f"Bot aktif 24 jam • M5 • gold-api.com"
-            )
-
-# ── Cek S&R ───────────────────────────────────────────────
-def check_sr(candle, all_candles):
-    if not market_open(): return
-    auto_sr  = calc_auto_sr(all_candles)
-    all_sr   = auto_sr + state["manual_sr"]
-    price    = candle["close"]
-    b        = detect_bos(all_candles)
-    rejection = detect_rejection(candle)
-
-    for sr in all_sr:
-        level = sr["price"]
-        label = sr["label"]
-        sr_type = sr["type"]
-
-        # Cek apakah harga dalam zona ±10 poin
-        if abs(price - level) > SR_TOLERANCE:
-            continue
-
-        # Touch alert
-        touch_key = f"touch-{label}-{now_wib().strftime('%Y-%m-%d-%H')}"
-        if touch_key not in state["sr_alerted"]:
-            state["sr_alerted"].add(touch_key)
-            emoji = "🔴" if sr_type == "resistance" else "🟢"
-            send_telegram(
-                f"📍 *Harga Menyentuh {sr_type.upper()}*\n"
-                f"━━━━━━━━━━━━━━\n"
-                f"{emoji} {label}: *${level:.2f}*\n"
-                f"💰 Harga: *${price:.2f}*\n"
-                f"📏 Jarak: {abs(price-level):.1f} poin\n"
-                f"🕐 {now_wib().strftime('%H:%M:%S')} WIB\n"
-                f"⏳ _Tunggu konfirmasi candle..._"
-            )
-            print(f"[SR TOUCH] {label} @ ${price:.2f}")
-
-        # Rejection alert
-        if rejection:
-            rej_key = f"rej-{label}-{now_wib().strftime('%Y-%m-%d-%H-%M')}"
-            if rej_key not in state["sr_alerted"]:
-                state["sr_alerted"].add(rej_key)
-                rej_emoji = "📈" if rejection == "BULLISH" else "📉"
-                action = "BUY" if rejection == "BULLISH" else "SELL"
-                send_telegram(
-                    f"🕯 *Candle Rejection di {sr_type.upper()}*\n"
-                    f"━━━━━━━━━━━━━━\n"
-                    f"{rej_emoji} *{action}* Signal\n"
-                    f"📍 Level: {label} *${level:.2f}*\n"
-                    f"💰 Harga: *${price:.2f}*\n"
-                    f"🕯 Pola: {rejection} Rejection\n"
-                    f"🕐 {now_wib().strftime('%H:%M:%S')} WIB\n"
-                    f"📊 TF: M5"
-                )
-                print(f"[SR REJECT] {rejection} @ {label} ${price:.2f}")
-
-        # BOS setelah menyentuh S&R
-        if b:
-            bos_key = f"bos-{label}-{b}-{now_wib().strftime('%Y-%m-%d-%H-%M')}"
-            if bos_key not in state["sr_alerted"]:
-                state["sr_alerted"].add(bos_key)
-                if b == "BULL" and sr_type == "support":
-                    send_telegram(
-                        f"💥 *BOS Bullish di SUPPORT!*\n"
-                        f"━━━━━━━━━━━━━━\n"
-                        f"📈 *KONFIRMASI BUY*\n"
-                        f"📍 Support: {label} *${level:.2f}*\n"
-                        f"💰 Harga: *${price:.2f}*\n"
-                        f"✅ BOS terkonfirmasi M5\n"
-                        f"🎯 Target: Resistance terdekat\n"
-                        f"🛡 SL: Di bawah support\n"
-                        f"🕐 {now_wib().strftime('%H:%M:%S')} WIB"
-                    )
-                elif b == "BEAR" and sr_type == "resistance":
-                    send_telegram(
-                        f"💥 *BOS Bearish di RESISTANCE!*\n"
-                        f"━━━━━━━━━━━━━━\n"
-                        f"📉 *KONFIRMASI SELL*\n"
-                        f"📍 Resistance: {label} *${level:.2f}*\n"
-                        f"💰 Harga: *${price:.2f}*\n"
-                        f"✅ BOS terkonfirmasi M5\n"
-                        f"🎯 Target: Support terdekat\n"
-                        f"🛡 SL: Di atas resistance\n"
-                        f"🕐 {now_wib().strftime('%H:%M:%S')} WIB"
-                    )
-                print(f"[SR BOS] {b} @ {label} ${price:.2f}")
 
 # ── Signal BOS Asia/London ────────────────────────────────
 def signal(sig_type, price, detail):
@@ -341,13 +223,94 @@ def signal(sig_type, price, detail):
     )
     print(f"[SIGNAL] {labels[sig_type]} @ ${price:.2f}")
 
+# ── Cek S&R Otomatis ──────────────────────────────────────
+def check_sr(candle, all_candles):
+    if not market_open(): return
+    price    = candle["close"]
+    b        = detect_bos(all_candles)
+    rej      = detect_rejection(candle)
+    auto_sr  = get_auto_sr(all_candles, price)
+
+    for sr in auto_sr:
+        level   = sr["price"]
+        label   = sr["label"]
+        sr_type = sr["type"]
+
+        if abs(price - level) > SR_TOLERANCE:
+            continue
+
+        # Touch
+        touch_key = f"touch-{label}-{now_wib().strftime('%Y-%m-%d-%H')}"
+        if touch_key not in state["sr_alerted"]:
+            state["sr_alerted"].add(touch_key)
+            emoji = "🔴" if sr_type == "resistance" else "🟢"
+            send_telegram(
+                f"📍 *Harga Menyentuh {sr_type.upper()}*\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"{emoji} *{label}*: ${level:.2f}\n"
+                f"💰 Harga: *${price:.2f}*\n"
+                f"📏 Jarak: {abs(price-level):.1f} poin\n"
+                f"🕐 {now_wib().strftime('%H:%M:%S')} WIB\n"
+                f"⏳ _Tunggu konfirmasi candle..._"
+            )
+            print(f"[SR TOUCH] {label} @ ${price:.2f}")
+
+        # Rejection
+        if rej:
+            rej_key = f"rej-{label}-{now_wib().strftime('%Y-%m-%d-%H-%M')}"
+            if rej_key not in state["sr_alerted"]:
+                state["sr_alerted"].add(rej_key)
+                action = "BUY 📈" if rej == "BULLISH" else "SELL 📉"
+                send_telegram(
+                    f"🕯 *Rejection di {sr_type.upper()}!*\n"
+                    f"━━━━━━━━━━━━━━\n"
+                    f"*{action}* Signal\n"
+                    f"📍 {label}: *${level:.2f}*\n"
+                    f"💰 Harga: *${price:.2f}*\n"
+                    f"🕯 Pola: {rej} Rejection\n"
+                    f"🕐 {now_wib().strftime('%H:%M:%S')} WIB\n"
+                    f"📊 TF: M5"
+                )
+                print(f"[SR REJ] {rej} @ {label} ${price:.2f}")
+
+        # BOS konfirmasi
+        if b:
+            bos_key = f"bos-{label}-{b}-{now_wib().strftime('%Y-%m-%d-%H-%M')}"
+            if bos_key not in state["sr_alerted"]:
+                state["sr_alerted"].add(bos_key)
+                if b == "BULL" and sr_type == "support":
+                    send_telegram(
+                        f"💥 *BOS Bullish di SUPPORT!*\n"
+                        f"━━━━━━━━━━━━━━\n"
+                        f"📈 *KONFIRMASI BUY*\n"
+                        f"📍 {label}: *${level:.2f}*\n"
+                        f"💰 Harga: *${price:.2f}*\n"
+                        f"✅ BOS terkonfirmasi M5\n"
+                        f"🎯 Target: Resistance terdekat\n"
+                        f"🛡 SL: Di bawah {label}\n"
+                        f"🕐 {now_wib().strftime('%H:%M:%S')} WIB"
+                    )
+                elif b == "BEAR" and sr_type == "resistance":
+                    send_telegram(
+                        f"💥 *BOS Bearish di RESISTANCE!*\n"
+                        f"━━━━━━━━━━━━━━\n"
+                        f"📉 *KONFIRMASI SELL*\n"
+                        f"📍 {label}: *${level:.2f}*\n"
+                        f"💰 Harga: *${price:.2f}*\n"
+                        f"✅ BOS terkonfirmasi M5\n"
+                        f"🎯 Target: Support terdekat\n"
+                        f"🛡 SL: Di atas {label}\n"
+                        f"🕐 {now_wib().strftime('%H:%M:%S')} WIB"
+                    )
+                print(f"[SR BOS] {b} @ {label} ${price:.2f}")
+
+# ── Process Candle ────────────────────────────────────────
 def process_candle(candle):
     if not market_open(): return
     sess  = get_session()
     all_c = state["candles"]
     b     = detect_bos(all_c)
 
-    # Cek S&R dulu
     check_sr(candle, all_c)
 
     if sess == "asia":
@@ -390,24 +353,94 @@ def process_candle(candle):
                 f"🎯 TP: High Asia *${hi:.2f}*\n"
                 f"🛡 SL: Bawah 61.8%\n📊 TF: M5")
 
+# ── Command Handler ───────────────────────────────────────
+def handle_commands():
+    updates = get_updates(offset=state["last_update"])
+    for upd in updates:
+        state["last_update"] = upd["update_id"] + 1
+        text = upd.get("message", {}).get("text", "").strip()
+        if not text: continue
+        print(f"[CMD] {text}")
+
+        if text in ("/start", "/help"):
+            send_telegram(
+                f"🥇 *XAUUSD Bot v3 - Auto S&R*\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"/status → Harga & status bot\n"
+                f"/listsr → Semua level S&R aktif\n"
+                f"/help   → Menu ini\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"🤖 S&R otomatis:\n"
+                f"• PDH/PDL (High Low kemarin)\n"
+                f"• Weekly High/Low\n"
+                f"• Monthly High/Low\n"
+                f"• Round Numbers ($100, $50)\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"Bot aktif 24 jam • M5 • gold-api.com"
+            )
+
+        elif text == "/status":
+            p = state["prev_price"]
+            sr_count = len(get_auto_sr(state["candles"], p or 0))
+            send_telegram(
+                f"📊 *Status Bot XAUUSD*\n"
+                f"━━━━━━━━━━━━━━\n"
+                f"💰 Harga: *${p:.2f}*\n"
+                f"🌏 Sesi: *{get_session()}*\n"
+                f"📍 Low Asia: *${state['asia_lo']:.2f}*\n" if state["asia_lo"] else
+                f"📍 Low Asia: Belum ada\n"
+                f"📍 High Asia: *${state['asia_hi']:.2f}*\n" if state["asia_hi"] else
+                f"📍 High Asia: Belum ada\n"
+                f"📐 Fib: {'✅ Aktif' if state['fib'] else '⏳ Belum'}\n"
+                f"📈 BUY Asia: {'✅' if state['buy_done'] else '⏳'}\n"
+                f"📉 SELL London: {'✅' if state['sell_done'] else '⏳'}\n"
+                f"🔄 BUY 61.8%: {'✅' if state['buy2_done'] else '⏳'}\n"
+                f"🎯 Level S&R aktif: {sr_count}\n"
+                f"🕐 {now_wib().strftime('%H:%M:%S')} WIB"
+            )
+
+        elif text == "/listsr":
+            p = state["prev_price"] or 0
+            levels = get_auto_sr(state["candles"], p)
+            if not levels:
+                send_telegram("⏳ Data S&R belum cukup. Tunggu beberapa jam lagi.")
+            else:
+                res = [l for l in levels if l["type"] == "resistance" and l["price"] > p]
+                sup = [l for l in levels if l["type"] == "support"    and l["price"] < p]
+                res = sorted(res, key=lambda x: x["price"])[:5]
+                sup = sorted(sup, key=lambda x: x["price"], reverse=True)[:5]
+                msg = [f"📋 *Level S&R Aktif* (harga: ${p:.2f})\n"]
+                if res:
+                    msg.append("🔴 *Resistance:*")
+                    for l in res:
+                        msg.append(f"  • {l['label']}: *${l['price']:.2f}* (+{l['price']-p:.1f})")
+                if sup:
+                    msg.append("\n🟢 *Support:*")
+                    for l in sup:
+                        msg.append(f"  • {l['label']}: *${l['price']:.2f}* (-{p-l['price']:.1f})")
+                send_telegram("\n".join(msg))
+
 # ── Main Loop ─────────────────────────────────────────────
 def main():
-    print("=" * 40)
-    print("  XAUUSD Auto Alert Bot v2 - M5")
-    print("  BOS + Fibonacci + S&R")
-    print("=" * 40)
+    print("=" * 45)
+    print("  XAUUSD Auto Alert Bot v3 - M5")
+    print("  BOS + Fibonacci + Auto S&R")
+    print("  PDH/PDL + Weekly + Monthly + Round Numbers")
+    print("=" * 45)
 
     send_telegram(
-        f"🚀 *XAUUSD Bot v2 Started!*\n"
+        f"🚀 *XAUUSD Bot v3 Started!*\n"
         f"━━━━━━━━━━━━━━\n"
         f"📡 API: gold-api.com (unlimited)\n"
         f"📊 Timeframe: M5\n"
-        f"🆕 *Fitur Baru: S&R Alert!*\n"
-        f"• Harga menyentuh S&R\n"
-        f"• Candle rejection di S&R\n"
-        f"• BOS konfirmasi di S&R\n\n"
-        f"Ketik /help untuk lihat commands\n"
-        f"🕐 {now_wib().strftime('%d %b %Y %H:%M')} WIB"
+        f"🤖 *Auto S&R aktif:*\n"
+        f"• PDH / PDL\n"
+        f"• Weekly High / Low\n"
+        f"• Monthly High / Low\n"
+        f"• Round Numbers ($100 & $50)\n"
+        f"🔒 Token: environment variable ✅\n"
+        f"🕐 {now_wib().strftime('%d %b %Y %H:%M')} WIB\n"
+        f"Ketik /help untuk commands!"
     )
 
     while True:
@@ -420,13 +453,14 @@ def main():
                 prev  = state["prev_price"]
                 chg   = round(price - prev, 2) if prev else 0
                 arrow = "▲" if chg >= 0 else "▼"
-                print(f"[{now_wib().strftime('%H:%M:%S')}] ${price:.2f} {arrow}{abs(chg):.2f} | {get_session()} | Lo:{state['asia_lo']} Hi:{state['asia_hi']}")
+                sess  = get_session()
+                print(f"[{now_wib().strftime('%H:%M:%S')}] ${price:.2f} {arrow}{abs(chg):.2f} | {sess} | Lo:{state['asia_lo']} Hi:{state['asia_hi']}")
 
                 mk = int(time.time() // 300)
                 if state["cur_candle"] is None or state["cur_candle"]["mk"] != mk:
                     if state["cur_candle"] is not None:
                         closed = {k: state["cur_candle"][k] for k in ["open","high","low","close"]}
-                        state["candles"] = state["candles"][-2016:] + [closed]
+                        state["candles"] = state["candles"][-8640:] + [closed]
                         process_candle(closed)
                     state["cur_candle"] = {"mk": mk, "open": price, "high": price, "low": price, "close": price}
                 else:
@@ -434,7 +468,6 @@ def main():
                     c["high"]  = max(c["high"], price)
                     c["low"]   = min(c["low"],  price)
                     c["close"] = price
-
                 state["prev_price"] = price
 
         except KeyboardInterrupt:
