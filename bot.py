@@ -4,8 +4,20 @@ import json
 from datetime import datetime, timezone, timedelta
 
 # ── Konfigurasi ──────────────────────────────────────────
-BOT_TOKEN = "8732972288:AAGNqtZecH2dJ3A8Tc2gZS9cJ4SJIcFdjq8"
-CHAT_ID    = "6772610365"
+import os
+BOT_TOKEN = os.environ.get("BOT_TOKEN")
+CHAT_ID   = os.environ.get("CHAT_ID")
+```
+
+---
+
+**3️⃣ Simpan token di Railway (aman)**
+- Buka Railway → project kamu
+- Klik **Variables**
+- Tambah:
+```
+BOT_TOKEN = token_baru_kamu
+CHAT_ID   = 6772610365
 FETCH_INTERVAL = 15  # detik
 
 # ── WIB UTC+7 ─────────────────────────────────────────────
