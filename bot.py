@@ -91,8 +91,8 @@ def get_luck_status(date=None):
         }
 
 
-BOT_TOKEN = os.environ.get("BOT_TOKEN")
-CHAT_ID   = os.environ.get("CHAT_ID")
+BOT_TOKEN = os.environ.get("7660942709:AAHjvW4sLMeUFlyEKui_fCaJoUa5JGrZzoY")
+CHAT_ID   = os.environ.get("5402843009")
 FETCH_INTERVAL = 15
 SR_TOLERANCE   = 10
 
